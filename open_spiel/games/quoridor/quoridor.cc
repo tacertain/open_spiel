@@ -150,7 +150,7 @@ QuoridorState::QuoridorState(std::shared_ptr<const Game> game, int board_size,
       ansi_color_output_(ansi_color_output),
       relative_moves_(relative_moves),
       // See ActionToMove for explanation of the below
-      base_for_relative_(2, board_diameter_+3, board_diameter_) {
+      base_for_relative_(2, 2, board_diameter_) {
   board_.resize(board_diameter_ * board_diameter_, kPlayerNone);
   players_.resize(num_players_);
   // Account for order of turns (order of play is clockwise)
@@ -208,10 +208,9 @@ void QuoridorState::InitializePlayer(QuoridorPlayer p) {
  * The original implementation mapped action IDs to absolute board positions.
  * This meant that moving "north" had a different ID for every pawn position.
  * When the option to make move actions IDs indicate the relative pawn 
- * movement, the relative moves were mapped "off board" to illegal move
- * locations that were at y values beyond the board_diameter. So when we
- * get those action IDs in, we need to convert them back into the absolute
- * position into which we need to place the pawn.
+ * movement, the relative moves were mapped to the upper-left 3x3 section.
+ * When we get those action IDs in relative mode, we need to convert them back
+ * into the absolute position into which we need to place the pawn.
  */
 Move QuoridorState::ActionToMove(Action action_id) const {
   Move move = GetMove(action_id % board_diameter_, action_id / board_diameter_);
@@ -678,7 +677,15 @@ QuoridorGame::QuoridorGame(const GameParameters& params)
       ansi_color_output_(ParameterValue<bool>("ansi_color_output")),
       num_players_(ParameterValue<int>("players")),
       relative_moves_(ParameterValue<bool>("relative_moves"))
-      {}
+      {
+        if (relative_moves_ && board_size_ < 3) {
+          // For relative moves, we need to be able to describe moves using a 3x3 grid
+          // and since we use the board to number the moves (see above), we need the
+          // playing board to be at least that big.
+          SpielFatalError("Board size must be at least 3x3.");
+        }
+
+      }
 
 }  // namespace quoridor
 }  // namespace open_spiel

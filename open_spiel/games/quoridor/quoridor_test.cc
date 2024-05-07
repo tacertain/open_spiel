@@ -42,7 +42,7 @@ void BasicQuoridorTests() {
   testing::RandomSimTest(*LoadGame("quoridor(board_size=9,wall_count=5)"), 3);
 
   testing::RandomSimTest(
-      *LoadGame("quoridor(board_size=9,wall_count=5)"),
+      *LoadGame("quoridor(board_size=9,wall_count=5,relative_moves=true)"),
       3);
 
   // Ansi colors!

@@ -53,7 +53,7 @@ function die() {
 }
 
 set -e  # exit when any command fails
-# set -x  # Prints all executed command
+set -x  # Prints all executed command
 
 MYDIR="$(dirname "$(realpath "$0")")"
 source "${MYDIR}/global_variables.sh"
@@ -196,8 +196,9 @@ else
   cmake -DPython3_EXECUTABLE=${PYBIN} \
         -DCMAKE_CXX_COMPILER=${CXX}                  \
         -DCMAKE_PREFIX_PATH=${LIBCXXWRAP_JULIA_DIR}  \
-        -DBUILD_TYPE=Testing                         \
+        -DBUILD_TYPE=Debug \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
+	-DCAFFE2_USE_CUDNN=1 \
         ../open_spiel
 
   if [ "$ARG_test_only" != "all" ]
