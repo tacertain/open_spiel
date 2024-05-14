@@ -21,14 +21,15 @@ from typing import Sequence
 
 import numpy as np
 import tensorflow.compat.v1 as tf
-
+import keras
+keras.config.disable_traceback_filtering()
 
 def cascade(x, fns):
   for fn in fns:
     x = fn(x)
   return x
 
-tfkl = tf.keras.layers
+tfkl = keras.layers
 conv_2d = functools.partial(tfkl.Conv2D, padding="same")
 
 
@@ -43,11 +44,17 @@ def batch_norm(training, updates, name):
   Returns:
     A function to apply to the previous layer.
   """
-  bn = tfkl.BatchNormalization(name=name)
-  def batch_norm_layer(x):
+  bn = tfkl.BatchNormalization(name=name, trainable=True)
+  print (f"training={training}")
+  def batch_norm_layer(x, training=training):
     # This emits a warning that training is a placeholder instead of a concrete
     # bool, but seems to work anyway.
-    applied = bn(x, training)
+    print (f"inner training={training}")
+    print (f"x.shape={x.shape}, training.shape={training.shape}")
+    print("weights:", len(bn.weights))
+    print("trainable_weights:", len(bn.trainable_weights))
+    print("non_trainable_weights:", len(bn.non_trainable_weights))
+    applied = bn(inputs=x, training=True)
     updates.extend(bn.updates)
     return applied
   return batch_norm_layer
