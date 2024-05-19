@@ -18,57 +18,39 @@ import collections
 import functools
 import os
 from typing import Sequence
+import os
+
+os.environ["KERAS_BACKEND"] = "tensorflow"
 
 import numpy as np
-import tensorflow.compat.v1 as tf
+import tensorflow as tf
 import keras
+import keras.layers as layers
 keras.config.disable_traceback_filtering()
 
 def cascade(x, fns):
   for fn in fns:
+    print ("Cascasing " + str(fn))
     x = fn(x)
   return x
 
-tfkl = keras.layers
-conv_2d = functools.partial(tfkl.Conv2D, padding="same")
+conv_2d = functools.partial(layers.Conv2D, padding="same")
 
 
-def batch_norm(training, updates, name):
-  """A batch norm layer.
-
-  Args:
-    training: A placeholder of whether this is done in training or not.
-    updates: A list to be extended with this layer's updates.
-    name: Name of the layer.
-
-  Returns:
-    A function to apply to the previous layer.
-  """
-  bn = tfkl.BatchNormalization(name=name, trainable=True)
-  print (f"training={training}")
-  def batch_norm_layer(x, training=training):
-    # This emits a warning that training is a placeholder instead of a concrete
-    # bool, but seems to work anyway.
-    print (f"inner training={training}")
-    print (f"x.shape={x.shape}, training.shape={training.shape}")
-    print("weights:", len(bn.weights))
-    print("trainable_weights:", len(bn.trainable_weights))
-    print("non_trainable_weights:", len(bn.non_trainable_weights))
-    applied = bn(inputs=x, training=True)
-    updates.extend(bn.updates)
-    return applied
-  return batch_norm_layer
+def batch_norm(name):
+  return layers.BatchNormalization(name=name)
 
 
-def residual_layer(inputs, num_filters, kernel_size, training, updates, name):
+
+def residual_layer(inputs, num_filters, kernel_size, name):
   return cascade(inputs, [
       conv_2d(num_filters, kernel_size, name=f"{name}_res_conv1"),
-      batch_norm(training, updates, f"{name}_res_batch_norm1"),
-      tfkl.Activation("relu"),
+      batch_norm(f"{name}_res_batch_norm1"),
+      layers.Activation("relu"),
       conv_2d(num_filters, kernel_size, name=f"{name}_res_conv2"),
-      batch_norm(training, updates, f"{name}_res_batch_norm2"),
-      lambda x: tfkl.add([x, inputs]),
-      tfkl.Activation("relu"),
+      batch_norm(f"{name}_res_batch_norm2"),
+      lambda x: layers.add([x, inputs]),
+      layers.Activation("relu"),
   ])
 
 
@@ -106,7 +88,7 @@ class Losses(collections.namedtuple("Losses", "policy value l2")):
     return Losses(self.policy / n, self.value / n, self.l2 / n)
 
 
-class Model(object):
+class Model(keras.Model):
   """An AlphaZero style model with a policy and value head.
 
   This supports three types of models: mlp, conv2d and resnet.
@@ -144,26 +126,25 @@ class Model(object):
 
   valid_model_types = ["mlp", "conv2d", "resnet"]
 
-  def __init__(self, session, saver, path):
+  def __init__(self, *args, **kwargs):
     """Init a model. Use build_model, from_checkpoint or from_graph instead."""
-    self._session = session
-    self._saver = saver
-    self._path = path
+    super().__init__(*args, **kwargs)
+    self.loss_tracker = keras.metrics.Mean(name="loss")
 
     def get_var(name):
       return self._session.graph.get_tensor_by_name(name + ":0")
 
-    self._input = get_var("input")
-    self._legals_mask = get_var("legals_mask")
-    self._training = get_var("training")
-    self._value_out = get_var("value_out")
-    self._policy_softmax = get_var("policy_softmax")
-    self._policy_loss = get_var("policy_loss")
-    self._value_loss = get_var("value_loss")
-    self._l2_reg_loss = get_var("l2_reg_loss")
-    self._policy_targets = get_var("policy_targets")
-    self._value_targets = get_var("value_targets")
-    self._train = self._session.graph.get_operation_by_name("train")
+#    self._input = get_var("input")
+#    self._legals_mask = get_var("legals_mask")
+#    self._training = get_var("training")
+#    self._value_out = get_var("value_out")
+#    self._policy_softmax = get_var("policy_softmax")
+#    self._policy_loss = get_var("policy_loss")
+#    self._value_loss = get_var("value_loss")
+#    self._l2_reg_loss = get_var("l2_reg_loss")
+#    self._policy_targets = get_var("policy_targets")
+#    self._value_targets = get_var("value_targets")
+#    self._train = self._session.graph.get_operation_by_name("train")
 
   @classmethod
   def build_model(cls, model_type, input_shape, output_size, nn_width, nn_depth,
@@ -173,22 +154,8 @@ class Model(object):
       raise ValueError(f"Invalid model type: {model_type}, "
                        f"expected one of: {cls.valid_model_types}")
 
-    # The order of creating the graph, init, saver, and session is important!
-    # https://stackoverflow.com/a/40788998
-    g = tf.Graph()  # Allow multiple independent models and graphs.
-    with g.as_default():
-      cls._define_graph(model_type, input_shape, output_size, nn_width,
+    return cls._define_graph(model_type, input_shape, output_size, nn_width,
                         nn_depth, weight_decay, learning_rate)
-      init = tf.variables_initializer(tf.global_variables(),
-                                      name="init_all_vars_op")
-      with tf.device("/cpu:0"):  # Saver only works on CPU.
-        saver = tf.train.Saver(
-            max_to_keep=10000, sharded=False, name="saver")
-    session = tf.Session(graph=g)
-    session.__enter__()
-    session.run(init)
-    return cls(session, saver, path)
-
   @classmethod
   def from_checkpoint(cls, checkpoint, path=None):
     """Load a model from a checkpoint."""
@@ -211,76 +178,68 @@ class Model(object):
     session.run("init_all_vars_op")
     return cls(session, saver, path)
 
-  def __del__(self):
-    if hasattr(self, "_session") and self._session:
-      self._session.close()
-
-  @staticmethod
-  def _define_graph(model_type, input_shape, output_size,
+  @classmethod
+  def _define_graph(cls, model_type, input_shape, output_size,
                     nn_width, nn_depth, weight_decay, learning_rate):
     """Define the model graph."""
     # Inference inputs
     input_size = int(np.prod(input_shape))
-    observations = tf.placeholder(tf.float32, [None, input_size], name="input")
-    legals_mask = tf.placeholder(tf.bool, [None, output_size],
+    observations = keras.Input(dtype="float32", shape=(input_size,), name="input")
+    legals_mask = keras.Input(dtype="bool", shape=(output_size,),
                                  name="legals_mask")
-    training = tf.placeholder(tf.bool, name="training")
-
-    bn_updates = []
 
     # Main torso of the network
     if model_type == "mlp":
       torso = observations  # Ignore the input shape, treat it as a flat array.
       for i in range(nn_depth):
         torso = cascade(torso, [
-            tfkl.Dense(nn_width, name=f"torso_{i}_dense"),
-            tfkl.Activation("relu"),
+            layers.Dense(nn_width, name=f"torso_{i}_dense"),
+            layers.Activation("relu"),
         ])
     elif model_type == "conv2d":
-      torso = tfkl.Reshape(input_shape)(observations)
+      torso = layers.Reshape(input_shape)(observations)
       for i in range(nn_depth):
         torso = cascade(torso, [
             conv_2d(nn_width, 3, name=f"torso_{i}_conv"),
-            batch_norm(training, bn_updates, f"torso_{i}_batch_norm"),
-            tfkl.Activation("relu"),
+            batch_norm(f"torso_{i}_batch_norm"),
+            layers.Activation("relu"),
         ])
     elif model_type == "resnet":
       torso = cascade(observations, [
-          tfkl.Reshape(input_shape),
+          layers.Reshape(input_shape),
           conv_2d(nn_width, 3, name="torso_in_conv"),
-          batch_norm(training, bn_updates, "torso_in_batch_norm"),
-          tfkl.Activation("relu"),
+          batch_norm("torso_in_batch_norm"),
+          layers.Activation("relu"),
       ])
       for i in range(nn_depth):
-        torso = residual_layer(torso, nn_width, 3, training, bn_updates,
-                               f"torso_{i}")
+        torso = residual_layer(torso, nn_width, 3, f"torso_{i}")
     else:
       raise ValueError("Unknown model type.")
 
     # The policy head
     if model_type == "mlp":
       policy_head = cascade(torso, [
-          tfkl.Dense(nn_width, name="policy_dense"),
-          tfkl.Activation("relu"),
+          layers.Dense(nn_width, name="policy_dense"),
+          layers.Activation("relu"),
       ])
     else:
       policy_head = cascade(torso, [
           conv_2d(filters=2, kernel_size=1, name="policy_conv"),
-          batch_norm(training, bn_updates, "policy_batch_norm"),
-          tfkl.Activation("relu"),
-          tfkl.Flatten(),
+          batch_norm("policy_batch_norm"),
+          layers.Activation("relu"),
+          layers.Flatten(),
       ])
-    policy_logits = tfkl.Dense(output_size, name="policy")(policy_head)
-    policy_logits = tf.where(legals_mask, policy_logits,
-                             -1e32 * tf.ones_like(policy_logits))
-    unused_policy_softmax = tf.identity(tfkl.Softmax()(policy_logits),
-                                        name="policy_softmax")
-    policy_targets = tf.placeholder(
-        shape=[None, output_size], dtype=tf.float32, name="policy_targets")
-    policy_loss = tf.reduce_mean(
-        tf.nn.softmax_cross_entropy_with_logits_v2(
-            logits=policy_logits, labels=policy_targets),
-        name="policy_loss")
+    print(f"policy_head.shape = {policy_head.shape}")
+    policy_logits = layers.Dense(output_size, name="policy")(policy_head)
+    print(f"policy_logits.shape = {policy_logits.shape}")
+    print(f"output_size = {output_size}")
+
+    class PolicyOutput(keras.Layer):
+      def call(self, legals_mask, policy_logits):
+        return layers.Softmax()(tf.where(legals_mask, policy_logits,
+                             -1e32 * tf.ones_like(policy_logits)))
+
+    policy_softmax = PolicyOutput(name="policy_softmax")(legals_mask, policy_logits)
 
     # The value head
     if model_type == "mlp":
@@ -288,76 +247,78 @@ class Model(object):
     else:
       value_head = cascade(torso, [
           conv_2d(filters=1, kernel_size=1, name="value_conv"),
-          batch_norm(training, bn_updates, "value_batch_norm"),
-          tfkl.Activation("relu"),
-          tfkl.Flatten(),
+          batch_norm("value_batch_norm"),
+          layers.Activation("relu"),
+          layers.Flatten(),
       ])
     value_out = cascade(value_head, [
-        tfkl.Dense(nn_width, name="value_dense"),
-        tfkl.Activation("relu"),
-        tfkl.Dense(1, name="value"),
-        tfkl.Activation("tanh"),
+        layers.Dense(nn_width, name="value_dense"),
+        layers.Activation("relu"),
+        layers.Dense(1, name="value"),
+        layers.Activation("tanh"),
     ])
     # Need the identity to name the single value output from the dense layer.
-    value_out = tf.identity(value_out, name="value_out")
-    value_targets = tf.placeholder(
-        shape=[None, 1], dtype=tf.float32, name="value_targets")
-    value_loss = tf.identity(tf.losses.mean_squared_error(
-        value_out, value_targets), name="value_loss")
+    value_out = keras.layers.Identity(name="value_out")(value_out)
 
-    l2_reg_loss = tf.add_n([
+    model = cls(inputs=[observations, legals_mask], outputs=[policy_softmax, value_out], name=f"AlphaZero")
+    model.compile(optimizer=keras.optimizers.Adam(learning_rate=learning_rate))
+    return model
+
+  def train_step(self, data):
+    inputs, goal_outputs = data
+    observations, legals_mask = inputs
+    policy_targets, value_targets = goal_outputs
+
+    with tf.GradientTape() as tape:
+      pred_outputs = self(inputs, training=True)  # Forward pass
+      policy_logits, value_target = pred_outputs
+      policy_loss = keras.ops.mean(
+        keras.ops.sparse_categorical_crossentropy(from_logits=True,
+            output=policy_logits, target=policy_targets))
+        
+      value_loss = keras.ops.mean_squared_error(value_out, value_targets)
+
+      l2_reg_loss = tf.add_n([
         weight_decay * tf.nn.l2_loss(var)
-        for var in tf.trainable_variables()
+        for var in self.trainable_variables()
         if "/bias:" not in var.name
-    ], name="l2_reg_loss")
+      ])
 
-    total_loss = policy_loss + value_loss + l2_reg_loss
-    optimizer = tf.train.AdamOptimizer(learning_rate)
-    with tf.control_dependencies(bn_updates):
-      unused_train = optimizer.minimize(total_loss, name="train")
+      total_loss = policy_loss + value_loss + l2_reg_loss
+
+    trainable_vars = self.trainable_variables
+    gradients = tape.gradient(total_loss, trainable_vars)
+
+    # Update weights
+    self.optimizer.apply(gradients, trainable_vars)
+
+    # Compute our own metrics
+    self.loss_tracker.update_state(total_loss)
+    
+    return {
+      "loss": self.loss_tracker.result(),
+    }
 
   @property
   def num_trainable_variables(self):
-    return sum(np.prod(v.shape) for v in tf.trainable_variables())
+    return sum(np.prod(v.shape) for v in self.trainable_variables)
 
   def print_trainable_variables(self):
-    for v in tf.trainable_variables():
+    for v in self.trainable_variables:
       print("{}: {}".format(v.name, v.shape))
 
   def write_graph(self, filename):
     full_path = os.path.join(self._path, filename)
-    tf.train.export_meta_graph(
-        graph_def=self._session.graph_def, saver_def=self._saver.saver_def,
-        filename=full_path, as_text=False)
+    self.save(full_path)
     return full_path
 
   def inference(self, observation, legals_mask):
-    return self._session.run(
-        [self._value_out, self._policy_softmax],
-        feed_dict={self._input: np.array(observation, dtype=np.float32),
-                   self._legals_mask: np.array(legals_mask, dtype=bool),
-                   self._training: False})
+    return self.predict([observation, legals_mask])
 
-  def update(self, train_inputs: Sequence[TrainInput]):
-    """Runs a training step."""
-    batch = TrainInput.stack(train_inputs)
-
-    # Run a training step and get the losses.
-    _, policy_loss, value_loss, l2_reg_loss = self._session.run(
-        [self._train, self._policy_loss, self._value_loss, self._l2_reg_loss],
-        feed_dict={self._input: batch.observation,
-                   self._legals_mask: batch.legals_mask,
-                   self._policy_targets: batch.policy,
-                   self._value_targets: batch.value,
-                   self._training: True})
-
-    return Losses(policy_loss, value_loss, l2_reg_loss)
-
-  def save_checkpoint(self, step):
-    return self._saver.save(
-        self._session,
-        os.path.join(self._path, "checkpoint"),
-        global_step=step)
+  def save_checkpoint(self, path):
+    print(f"About to save checkpoint to {path}")
+    self.save_weights(path, overwrite=True)
+    print(f"Saved checkpoint to {path}")
 
   def load_checkpoint(self, path):
-    return self._saver.restore(self._session, path)
+    return self.load_weights(full_path, overwrite=True)

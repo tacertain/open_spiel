@@ -45,6 +45,8 @@ import traceback
 
 import numpy as np
 
+import keras.callbacks as kcb
+
 from open_spiel.python.algorithms import mcts
 from open_spiel.python.algorithms.alpha_zero import evaluator as evaluator_lib
 from open_spiel.python.algorithms.alpha_zero import model as model_lib
@@ -278,6 +280,15 @@ def actor(*, config, game, logger, queue):
     queue.put(_play_game(logger, game_num, game, bots, config.temperature,
                          config.temperature_drop))
 
+@watcher
+def fake_evaluator(*, game, config, logger, queue):
+  time.sleep(3)
+  print ("tester start")
+  results = Buffer(config.evaluation_window)
+  logger.print("Initializing model")
+  model = _init_model_from_config(config)
+  logger.print("Initializing bots")
+  return
 
 @watcher
 def evaluator(*, game, config, logger, queue):
@@ -320,6 +331,25 @@ def evaluator(*, game, config, logger, queue):
         trajectory.returns[1 - az_player],
         len(results), np.mean(results.data)))
 
+class CheckpointSaverCallback(kcb.Callback):
+  def __init__(self, broadcast_fn, checkpoint_freq, path):
+    super().__init__()
+    self._broadcast_fn = broadcast_fn
+    self._checkpoint_freq = checkpoint_freq
+    self._path = path
+
+  def force_checkpoint(self):
+    full_path = os.path.join(self._path, "checkpoint-latest.weights.h5")
+    self.model.save_checkpoint(full_path)
+    return full_path
+
+  def on_train_batch_end(self, batch, logs=None):
+    if batch % self._checkpoint_freq == 0:
+      full_path = os.path.join(self._path, "checkpoint-{%d}.weights.h5".format(batch))
+    else:
+      full_path = os.path.join(self._path, "checkpoint-latest.weights.h5")
+    self.model.save_checkpoint(full_path)
+    self._broadcast_fn(full_path)
 
 @watcher
 def learner(*, game, config, actors, evaluators, broadcast_fn, logger):
@@ -332,9 +362,11 @@ def learner(*, game, config, actors, evaluators, broadcast_fn, logger):
   logger.print("Model type: %s(%s, %s)" % (config.nn_model, config.nn_width,
                                            config.nn_depth))
   logger.print("Model size:", model.num_trainable_variables, "variables")
-  save_path = model.save_checkpoint(0)
-  logger.print("Initial checkpoint:", save_path)
-  broadcast_fn(save_path)
+
+  checkpoint_path = os.path.join(config.path, "checkpoint-latest.weights.h5")
+  model.save_checkpoint(checkpoint_path)
+  logger.print("Initial checkpoint:", checkpoint_path)
+  broadcast_fn(checkpoint_path)
 
   data_log = data_logger.DataLoggerJsonLines(config.path, "learner", True)
 
@@ -398,19 +430,20 @@ def learner(*, game, config, actors, evaluators, broadcast_fn, logger):
 
   def learn(step):
     """Sample from the replay buffer, update weights and save a checkpoint."""
-    losses = []
-    for _ in range(len(replay_buffer) // config.train_batch_size):
-      data = replay_buffer.sample(config.train_batch_size)
-      losses.append(model.update(data))
+    histories = []
+    checkpointer = CheckpointSaverCallback(broadcast_fn, config.checkpoint_freq, config.path)
 
-    # Always save a checkpoint, either for keeping or for loading the weights to
-    # the actors. It only allows numbers, so use -1 as "latest".
-    save_path = model.save_checkpoint(
-        step if step % config.checkpoint_freq == 0 else -1)
-    losses = sum(losses, model_lib.Losses(0, 0, 0)) / len(losses)
-    logger.print(losses)
-    logger.print("Checkpoint saved:", save_path)
-    return save_path, losses
+    for _ in range(len(replay_buffer) // config.train_batch_size):
+      inputs = replay_buffer.sample(config.train_batch_size)
+      batch = TrainInput.stack(inputs)
+
+      histories.append(model.fit(x=[batch.observation, batch.legals_mask], y=[batch.policy, batch.value],
+        callbacks=[checkpointer]))
+
+    # XXX - Need to figure out how to sum up all the losses here
+    #losses = sum(losses, model_lib.Losses(0, 0, 0)) / len(losses)
+    #logger.print(losses)
+    return None
 
   last_time = time.time() - 60
   for step in itertools.count(1):
@@ -438,7 +471,7 @@ def learner(*, game, config, actors, evaluators, broadcast_fn, logger):
     logger.print("Buffer size: {}. States seen: {}".format(
         len(replay_buffer), replay_buffer.total_seen))
 
-    save_path, losses = learn(step)
+    losses = learn(step)
 
     for eval_process in evaluators:
       while True:
@@ -469,12 +502,12 @@ def learner(*, game, config, actors, evaluators, broadcast_fn, logger):
         },
         "batch_size": batch_size_stats.as_dict,
         "batch_size_hist": [0, 1],
-        "loss": {
-            "policy": losses.policy,
-            "value": losses.value,
-            "l2reg": losses.l2,
-            "sum": losses.total,
-        },
+#        "loss": {
+#            "policy": losses.policy,
+#            "value": losses.value,
+#            "l2reg": losses.l2,
+#            "sum": losses.total,
+#        },
         "cache": {  # Null stats because it's hard to report between processes.
             "size": 0,
             "max_size": 0,
@@ -491,9 +524,6 @@ def learner(*, game, config, actors, evaluators, broadcast_fn, logger):
 
     if config.max_steps > 0 and step >= config.max_steps:
       break
-
-    broadcast_fn(save_path)
-
 
 def alpha_zero(config: Config):
   """Start all the worker processes for a full alphazero setup."""
@@ -533,7 +563,7 @@ def alpha_zero(config: Config):
   actors = [spawn.Process(actor, kwargs={"game": game, "config": config,
                                          "num": i})
             for i in range(config.actors)]
-  evaluators = [spawn.Process(evaluator, kwargs={"game": game, "config": config,
+  evaluators = [spawn.Process(fake_evaluator, kwargs={"game": game, "config": config,
                                                  "num": i})
                 for i in range(config.evaluators)]
 
